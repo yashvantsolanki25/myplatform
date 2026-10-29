@@ -84,10 +84,10 @@ func runDeploy(cmd *cobra.Command, _ []string) error {
 	var wg sync.WaitGroup
 	for i, t := range targets {
 		wg.Add(1)
-		go func() {
+		go func(i int, t target) {
 			defer wg.Done()
 			results[i] = deployOne(ctx, t, spec, deployFlags.wait)
-		}()
+		}(i, t)
 	}
 	wg.Wait()
 

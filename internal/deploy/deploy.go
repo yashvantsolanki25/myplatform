@@ -145,11 +145,13 @@ func WaitReady(ctx context.Context, cs kubernetes.Interface, ns, name string, ti
 	defer cancel()
 
 	var last Status
+	var lastErr error
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
 	for {
 		d, err := cs.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
 		if err == nil {
+			lastErr = nil
 			last = Status{Ready: d.Status.ReadyReplicas, Updated: d.Status.UpdatedReplicas}
 			if d.Spec.Replicas != nil {
 				last.Desired = *d.Spec.Replicas
@@ -158,9 +160,14 @@ func WaitReady(ctx context.Context, cs kubernetes.Interface, ns, name string, ti
 				last.Ready == last.Desired && last.Updated == last.Desired {
 				return last, nil
 			}
+		} else if !apierrors.IsNotFound(err) {
+			lastErr = err
 		}
 		select {
 		case <-ctx.Done():
+			if lastErr != nil {
+				return last, fmt.Errorf("timed out waiting for rollout (%s ready): %w", last, lastErr)
+			}
 			return last, fmt.Errorf("timed out waiting for rollout (%s ready)", last)
 		case <-tick.C:
 		}

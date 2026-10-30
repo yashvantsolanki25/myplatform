@@ -8,6 +8,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go/middleware"
@@ -21,10 +22,18 @@ type AWS struct {
 	cfgs map[string]aws.Config // keyed by region
 }
 
-func NewAWS(ctx context.Context, regions []string) (*AWS, error) {
+func NewAWS(ctx context.Context, regions []string, creds *AWSCredentials) (*AWS, error) {
 	a := &AWS{cfgs: map[string]aws.Config{}}
 	for _, r := range regions {
-		cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(r))
+		opts := []func(*config.LoadOptions) error{config.WithRegion(r)}
+		if creds != nil && creds.AccessKeyID != "" {
+			opts = append(opts, config.WithCredentialsProvider(
+				credentials.NewStaticCredentialsProvider(
+					creds.AccessKeyID, creds.SecretAccessKey, creds.SessionToken,
+				),
+			))
+		}
+		cfg, err := config.LoadDefaultConfig(ctx, opts...)
 		if err != nil {
 			return nil, err
 		}

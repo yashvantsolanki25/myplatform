@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/example/myplatform/internal/deploy"
 	"github.com/example/myplatform/internal/provider"
+	"golang.org/x/oauth2/google"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -21,10 +23,79 @@ type target struct {
 	c provider.Cluster
 }
 
-// discover lists clusters from every configured provider, keeping
-// partial results even when a provider returns an error.
-func (s *Server) discover(ctx context.Context) ([]target, []string, error) {
-	provs, err := provider.Build(ctx, s.getOpts())
+// buildUserOptions reads the user's stored (encrypted) credentials, decrypts
+// them, and builds provider.Options with explicit credential objects.
+func (s *Server) buildUserOptions(userID int) (provider.Options, error) {
+	var opts provider.Options
+
+	has, err := s.store.HasCredentials(userID, "aws")
+	if err != nil {
+		return opts, err
+	}
+	if has {
+		var cfg AWSCredConfig
+		if err := s.store.GetDecryptedCredentials(userID, "aws", &cfg); err != nil {
+			return opts, err
+		}
+		opts.AWSRegions = cfg.Regions
+		if cfg.AccessKeyID != "" {
+			opts.AWSCreds = &provider.AWSCredentials{
+				AccessKeyID:     cfg.AccessKeyID,
+				SecretAccessKey: cfg.SecretAccessKey,
+				SessionToken:    cfg.SessionToken,
+			}
+		}
+	}
+
+	has, err = s.store.HasCredentials(userID, "gcp")
+	if err != nil {
+		return opts, err
+	}
+	if has {
+		var cfg GCPCredConfig
+		if err := s.store.GetDecryptedCredentials(userID, "gcp", &cfg); err != nil {
+			return opts, err
+		}
+		opts.GCPProject = cfg.ProjectID
+		if cfg.ServiceAccountKey != "" {
+			opts.GCPCreds = &provider.GCPCredentials{
+				ServiceAccountJSON: cfg.ServiceAccountKey,
+			}
+		}
+	}
+
+	has, err = s.store.HasCredentials(userID, "azure")
+	if err != nil {
+		return opts, err
+	}
+	if has {
+		var cfg AzureCredConfig
+		if err := s.store.GetDecryptedCredentials(userID, "azure", &cfg); err != nil {
+			return opts, err
+		}
+		opts.AzureSubscription = cfg.SubscriptionID
+		if cfg.ClientID != "" {
+			opts.AzureCreds = &provider.AzureCredentials{
+				ClientID:     cfg.ClientID,
+				ClientSecret: cfg.ClientSecret,
+				TenantID:     cfg.TenantID,
+			}
+		}
+	}
+
+	return opts, nil
+}
+
+// discover lists clusters from every configured provider for the given user.
+func (s *Server) discover(ctx context.Context, userID int) ([]target, []string, error) {
+	opts, err := s.buildUserOptions(userID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(opts.AWSRegions) == 0 && opts.GCPProject == "" && opts.AzureSubscription == "" {
+		return nil, nil, fmt.Errorf("no cloud credentials configured; open Cloud Credentials settings")
+	}
+	provs, err := provider.Build(ctx, opts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -81,7 +152,13 @@ func writeError(w http.ResponseWriter, status int, err error) {
 
 // --- handlers ---
 
-func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.store.Ping(ctx); err != nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("database unavailable"))
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -95,8 +172,13 @@ type clusterOut struct {
 }
 
 func (s *Server) handleClusters(w http.ResponseWriter, r *http.Request) {
+	userID, err := userIDFromCtx(r.Context())
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
 	ctx := r.Context()
-	all, warnings, err := s.discover(ctx)
+	all, warnings, err := s.discover(ctx, userID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -129,6 +211,7 @@ type jobResult struct {
 
 type job struct {
 	ID        string      `json:"id"`
+	UserID    int         `json:"-"`
 	Status    string      `json:"status"`
 	Name      string      `json:"name"`
 	Image     string      `json:"image"`
@@ -187,6 +270,11 @@ type deployRequest struct {
 }
 
 func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
+	userID, err := userIDFromCtx(r.Context())
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
 	var req deployRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid JSON body"))
@@ -211,7 +299,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	all, _, err := s.discover(ctx)
+	all, _, err := s.discover(ctx, userID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -224,6 +312,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 
 	j := &job{
 		ID:     newJobID(),
+		UserID: userID,
 		Status: "running",
 		Name:   req.Name,
 		Image:  req.Image,
@@ -242,8 +331,6 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		Env:       req.Env,
 	}
 
-	// Run deployments in the background using the server context so they
-	// survive after the HTTP response is sent.
 	go s.runJob(s.ctx, j, targets, spec, wait)
 
 	writeJSON(w, http.StatusAccepted, map[string]string{"jobId": j.ID})
@@ -297,11 +384,16 @@ func (s *Server) runJob(ctx context.Context, j *job, targets []target, spec depl
 }
 
 func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
+	userID, err := userIDFromCtx(r.Context())
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
 	id := r.PathValue("id")
 	jobsMu.RLock()
 	j, ok := jobs[id]
 	jobsMu.RUnlock()
-	if !ok {
+	if !ok || j.UserID != userID {
 		writeError(w, http.StatusNotFound, fmt.Errorf("job not found"))
 		return
 	}
@@ -317,6 +409,11 @@ type statusOut struct {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	userID, err := userIDFromCtx(r.Context())
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
 	name := r.URL.Query().Get("name")
 	if name == "" {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("name is required"))
@@ -329,7 +426,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	clusterRefs := r.URL.Query()["cluster"]
 
 	ctx := r.Context()
-	all, _, err := s.discover(ctx)
+	all, _, err := s.discover(ctx, userID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -372,43 +469,227 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"statuses": out})
 }
 
-// --- config handlers ---
+// --- credential handlers ---
 
-type configOut struct {
-	AWSRegions        []string `json:"awsRegions"`
-	GCPProject        string   `json:"gcpProject"`
-	AzureSubscription string   `json:"azureSubscription"`
-}
-
-func (s *Server) handleGetConfig(w http.ResponseWriter, _ *http.Request) {
-	opts := s.getOpts()
-	regions := opts.AWSRegions
-	if regions == nil {
-		regions = []string{}
-	}
-	writeJSON(w, http.StatusOK, configOut{
-		AWSRegions:        regions,
-		GCPProject:        opts.GCPProject,
-		AzureSubscription: opts.AzureSubscription,
-	})
-}
-
-type configRequest struct {
-	AWSRegions        []string `json:"awsRegions"`
-	GCPProject        string   `json:"gcpProject"`
-	AzureSubscription string   `json:"azureSubscription"`
-}
-
-func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
-	var req configRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid JSON body"))
+func (s *Server) handleGetCredentials(w http.ResponseWriter, r *http.Request) {
+	userID, err := userIDFromCtx(r.Context())
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
 		return
 	}
-	s.setOpts(provider.Options{
-		AWSRegions:        req.AWSRegions,
-		GCPProject:        req.GCPProject,
-		AzureSubscription: req.AzureSubscription,
-	})
-	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+
+	result := map[string]any{}
+
+	// Return only non-secret fields; credential values are never sent back.
+	has, err := s.store.HasCredentials(userID, "aws")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("load credentials"))
+		return
+	}
+	if has {
+		var cfg AWSCredConfig
+		if err := s.store.GetDecryptedCredentials(userID, "aws", &cfg); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Errorf("load credentials"))
+			return
+		}
+		result["aws"] = map[string]any{
+			"configured":  true,
+			"regions":     cfg.Regions,
+			"accessKeyId": maskSecret(cfg.AccessKeyID),
+		}
+	}
+	if result["aws"] == nil {
+		result["aws"] = map[string]any{"configured": false}
+	}
+
+	// GCP
+	has, err = s.store.HasCredentials(userID, "gcp")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("load credentials"))
+		return
+	}
+	if has {
+		var cfg GCPCredConfig
+		if err := s.store.GetDecryptedCredentials(userID, "gcp", &cfg); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Errorf("load credentials"))
+			return
+		}
+		result["gcp"] = map[string]any{
+			"configured": true,
+			"projectId":  cfg.ProjectID,
+		}
+	}
+	if result["gcp"] == nil {
+		result["gcp"] = map[string]any{"configured": false}
+	}
+
+	// Azure
+	has, err = s.store.HasCredentials(userID, "azure")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("load credentials"))
+		return
+	}
+	if has {
+		var cfg AzureCredConfig
+		if err := s.store.GetDecryptedCredentials(userID, "azure", &cfg); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Errorf("load credentials"))
+			return
+		}
+		result["azure"] = map[string]any{
+			"configured":     true,
+			"subscriptionId": cfg.SubscriptionID,
+			"tenantId":       cfg.TenantID,
+		}
+	}
+	if result["azure"] == nil {
+		result["azure"] = map[string]any{"configured": false}
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// maskSecret shows the last 4 chars of a secret for verification without
+// exposing the full value (A02).
+func maskSecret(s string) string {
+	if len(s) <= 4 {
+		return "••••"
+	}
+	return "••••••" + s[len(s)-4:]
+}
+
+func (s *Server) handleSaveCredentials(w http.ResponseWriter, r *http.Request) {
+	userID, err := userIDFromCtx(r.Context())
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
+
+	prov := r.PathValue("provider")
+	if prov != "aws" && prov != "gcp" && prov != "azure" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid provider: %s", prov))
+		return
+	}
+
+	var raw json.RawMessage
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err := decoder.Decode(&raw); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid request body"))
+		return
+	}
+
+	switch prov {
+	case "aws":
+		var cfg AWSCredConfig
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		cfg.AccessKeyID = strings.TrimSpace(cfg.AccessKeyID)
+		cfg.SecretAccessKey = strings.TrimSpace(cfg.SecretAccessKey)
+		cfg.SessionToken = strings.TrimSpace(cfg.SessionToken)
+		for i := range cfg.Regions {
+			cfg.Regions[i] = strings.TrimSpace(cfg.Regions[i])
+		}
+		cfg.Regions = compactStrings(cfg.Regions)
+		if len(cfg.Regions) == 0 {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("at least one AWS region is required"))
+			return
+		}
+		hasAccessKey := cfg.AccessKeyID != ""
+		hasSecretKey := cfg.SecretAccessKey != ""
+		if hasAccessKey != hasSecretKey {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("accessKeyId and secretAccessKey must both be provided"))
+			return
+		}
+		if !hasAccessKey && cfg.SessionToken != "" {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("sessionToken requires AWS access keys"))
+			return
+		}
+		if err := s.store.SaveCredentials(userID, "aws", cfg); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	case "gcp":
+		var cfg GCPCredConfig
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		cfg.ServiceAccountKey = strings.TrimSpace(cfg.ServiceAccountKey)
+		cfg.ProjectID = strings.TrimSpace(cfg.ProjectID)
+		if cfg.ProjectID == "" {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("projectId is required"))
+			return
+		}
+		if cfg.ServiceAccountKey != "" {
+			if _, err := google.JWTConfigFromJSON(
+				[]byte(cfg.ServiceAccountKey),
+				"https://www.googleapis.com/auth/cloud-platform",
+			); err != nil {
+				writeError(w, http.StatusBadRequest, fmt.Errorf("invalid Google service account JSON"))
+				return
+			}
+		}
+		if err := s.store.SaveCredentials(userID, "gcp", cfg); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	case "azure":
+		var cfg AzureCredConfig
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		cfg.ClientID = strings.TrimSpace(cfg.ClientID)
+		cfg.ClientSecret = strings.TrimSpace(cfg.ClientSecret)
+		cfg.TenantID = strings.TrimSpace(cfg.TenantID)
+		cfg.SubscriptionID = strings.TrimSpace(cfg.SubscriptionID)
+		if cfg.SubscriptionID == "" {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("subscriptionId is required"))
+			return
+		}
+		hasClientID := cfg.ClientID != ""
+		hasClientSecret := cfg.ClientSecret != ""
+		hasTenantID := cfg.TenantID != ""
+		if hasClientID != hasClientSecret || hasClientID != hasTenantID {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("clientId, clientSecret, and tenantId must all be provided together"))
+			return
+		}
+		if err := s.store.SaveCredentials(userID, "azure", cfg); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+
+	fmt.Printf("[cred] saved %s credentials for user %d\n", prov, userID) // A09: logging
+	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+}
+
+func compactStrings(values []string) []string {
+	out := values[:0]
+	for _, value := range values {
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func (s *Server) handleDeleteCredentials(w http.ResponseWriter, r *http.Request) {
+	userID, err := userIDFromCtx(r.Context())
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
+	prov := r.PathValue("provider")
+	if prov != "aws" && prov != "gcp" && prov != "azure" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid provider: %s", prov))
+		return
+	}
+	if err := s.store.DeleteCredentials(userID, prov); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	fmt.Printf("[cred] deleted %s credentials for user %d\n", prov, userID) // A09
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

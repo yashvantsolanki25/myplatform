@@ -19,7 +19,15 @@ type GCP struct {
 	ts      oauth2.TokenSource
 }
 
-func NewGCP(ctx context.Context, project string) (*GCP, error) {
+func NewGCP(ctx context.Context, project string, creds *GCPCredentials) (*GCP, error) {
+	if creds != nil && creds.ServiceAccountJSON != "" {
+		conf, err := google.JWTConfigFromJSON([]byte(creds.ServiceAccountJSON),
+			"https://www.googleapis.com/auth/cloud-platform")
+		if err != nil {
+			return nil, fmt.Errorf("parse service account key: %w", err)
+		}
+		return &GCP{project: project, ts: conf.TokenSource(ctx)}, nil
+	}
 	ts, err := google.DefaultTokenSource(ctx, "https://www.googleapis.com/auth/cloud-platform")
 	if err != nil {
 		return nil, err

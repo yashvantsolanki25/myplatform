@@ -34,11 +34,36 @@ type Provider interface {
 	RESTConfig(ctx context.Context, c Cluster) (*rest.Config, error)
 }
 
+// AWSCredentials holds explicit AWS access keys. When nil, the SDK
+// default credential chain is used (env vars, shared config, SSO, ...).
+type AWSCredentials struct {
+	AccessKeyID     string
+	SecretAccessKey string
+	SessionToken    string // optional, for temporary credentials
+}
+
+// GCPCredentials holds a service account JSON key. When nil, Application
+// Default Credentials are used.
+type GCPCredentials struct {
+	ServiceAccountJSON string
+}
+
+// AzureCredentials holds a service principal. When nil, DefaultAzureCredential
+// is used (env vars, managed identity, az login, ...).
+type AzureCredentials struct {
+	ClientID     string
+	ClientSecret string
+	TenantID     string
+}
+
 // Options selects which clouds are enabled.
 type Options struct {
 	AWSRegions        []string
 	GCPProject        string
 	AzureSubscription string
+	AWSCreds          *AWSCredentials
+	GCPCreds          *GCPCredentials
+	AzureCreds        *AzureCredentials
 }
 
 // Build constructs a provider for every cloud that was configured.
@@ -47,7 +72,7 @@ func Build(ctx context.Context, o Options) ([]Provider, error) {
 	var errs []error
 
 	if len(o.AWSRegions) > 0 {
-		p, err := NewAWS(ctx, o.AWSRegions)
+		p, err := NewAWS(ctx, o.AWSRegions, o.AWSCreds)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("aws: %w", err))
 		} else {
@@ -55,7 +80,7 @@ func Build(ctx context.Context, o Options) ([]Provider, error) {
 		}
 	}
 	if o.GCPProject != "" {
-		p, err := NewGCP(ctx, o.GCPProject)
+		p, err := NewGCP(ctx, o.GCPProject, o.GCPCreds)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("gcp: %w", err))
 		} else {
@@ -63,7 +88,7 @@ func Build(ctx context.Context, o Options) ([]Provider, error) {
 		}
 	}
 	if o.AzureSubscription != "" {
-		p, err := NewAzure(o.AzureSubscription)
+		p, err := NewAzure(o.AzureSubscription, o.AzureCreds)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("azure: %w", err))
 		} else {

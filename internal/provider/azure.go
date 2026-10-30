@@ -25,7 +25,16 @@ type Azure struct {
 	cred azcore.TokenCredential
 }
 
-func NewAzure(subscription string) (*Azure, error) {
+func NewAzure(subscription string, creds *AzureCredentials) (*Azure, error) {
+	if creds != nil && creds.ClientID != "" {
+		cred, err := azidentity.NewClientSecretCredential(
+			creds.TenantID, creds.ClientID, creds.ClientSecret, nil,
+		)
+		if err != nil {
+			return nil, err
+		}
+		return &Azure{sub: subscription, cred: cred}, nil
+	}
 	cred, err := azidentity.NewDefaultAzureCredential(nil)
 	if err != nil {
 		return nil, err

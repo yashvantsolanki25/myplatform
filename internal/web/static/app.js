@@ -452,6 +452,8 @@ async function loadCredentials() {
 
 async function saveCred(prov) {
   let body;
+  const btn = $(`#save${prov[0].toUpperCase()}${prov.slice(1)}Btn`);
+  const label = btn.textContent;
   if (prov === 'aws') {
     body = {
       accessKeyId: $('#awsAccessKey').value.trim(),
@@ -467,6 +469,8 @@ async function saveCred(prov) {
       tenantId: $('#azureTenantId').value.trim(), subscriptionId: $('#azureSubscriptionId').value.trim(),
     };
   }
+  btn.disabled = true;
+  btn.textContent = 'Verifying & saving…';
   try {
     const res = await API.saveCredentials(prov, body);
     if (res.error) { toast(res.error, 'error'); return; }
@@ -483,6 +487,10 @@ async function saveCred(prov) {
     state.selectedClusters.clear();
     loadClusters();
   } catch (err) { toast('Failed: ' + err.message, 'error'); }
+  finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
 }
 
 async function removeCred(prov) {

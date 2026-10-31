@@ -182,7 +182,12 @@ func TestCloudCredentialSubmissionAndSecretRedaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{store: store}
+	server := &Server{
+		store: store,
+		credentialValidator: func(context.Context, string, any) error {
+			return nil
+		},
+	}
 	ctx := context.WithValue(context.Background(), userCtxKey, user.ID)
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -239,6 +244,46 @@ func TestCloudCredentialSubmissionAndSecretRedaction(t *testing.T) {
 		if !strings.Contains(response.Body.String(), provider) {
 			t.Errorf("credential response missing provider %s", provider)
 		}
+	}
+}
+
+func TestCredentialValidationFailureDoesNotSaveCredentials(t *testing.T) {
+	store := testStore(t)
+	user, err := store.CreateUser("validation@example.com", "Validation User", "password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := AWSCredConfig{
+		AccessKeyID:     "AKIAOLD",
+		SecretAccessKey: "old-secret",
+		Regions:         []string{"us-east-1"},
+	}
+	if err := store.SaveCredentials(user.ID, "aws", old); err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{
+		store: store,
+		credentialValidator: func(context.Context, string, any) error {
+			return errors.New("access denied")
+		},
+	}
+	request := httptest.NewRequest(http.MethodPut, "/api/credentials/aws", strings.NewReader(
+		`{"accessKeyId":"AKIANEW","secretAccessKey":"new-secret","regions":["us-west-2"]}`,
+	)).WithContext(context.WithValue(context.Background(), userCtxKey, user.ID))
+	request.SetPathValue("provider", "aws")
+	response := httptest.NewRecorder()
+	server.handleSaveCredentials(response, request)
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("save status = %d, body = %s; want %d", response.Code, response.Body, http.StatusUnprocessableEntity)
+	}
+
+	var got AWSCredConfig
+	if err := store.GetDecryptedCredentials(user.ID, "aws", &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.AccessKeyID != old.AccessKeyID || got.SecretAccessKey != old.SecretAccessKey || got.Regions[0] != old.Regions[0] {
+		t.Fatalf("stored credentials after failed validation = %#v; want %#v", got, old)
 	}
 }
 

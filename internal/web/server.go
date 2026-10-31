@@ -20,10 +20,11 @@ type Config struct {
 }
 
 type Server struct {
-	cfg   Config
-	ctx   context.Context
-	store *Store
-	rl    *rateLimiter
+	cfg                 Config
+	ctx                 context.Context
+	store               *Store
+	rl                  *rateLimiter
+	credentialValidator func(context.Context, string, any) error
 }
 
 func NewServer(ctx context.Context, cfg Config) *Server {

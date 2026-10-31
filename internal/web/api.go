@@ -605,6 +605,10 @@ func (s *Server) handleSaveCredentials(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, fmt.Errorf("sessionToken requires AWS access keys"))
 			return
 		}
+		if err := s.validateCredentials(r.Context(), prov, cfg); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, fmt.Errorf("AWS credentials could not be verified: %w", err))
+			return
+		}
 		if err := s.store.SaveCredentials(userID, "aws", cfg); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -629,6 +633,10 @@ func (s *Server) handleSaveCredentials(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusBadRequest, fmt.Errorf("invalid Google service account JSON"))
 				return
 			}
+		}
+		if err := s.validateCredentials(r.Context(), prov, cfg); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, fmt.Errorf("GCP credentials could not be verified: %w", err))
+			return
 		}
 		if err := s.store.SaveCredentials(userID, "gcp", cfg); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -655,6 +663,10 @@ func (s *Server) handleSaveCredentials(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, fmt.Errorf("clientId, clientSecret, and tenantId must all be provided together"))
 			return
 		}
+		if err := s.validateCredentials(r.Context(), prov, cfg); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, fmt.Errorf("Azure credentials could not be verified: %w", err))
+			return
+		}
 		if err := s.store.SaveCredentials(userID, "azure", cfg); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -673,6 +685,68 @@ func compactStrings(values []string) []string {
 		}
 	}
 	return out
+}
+
+func (s *Server) validateCredentials(ctx context.Context, prov string, cfg any) error {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if s.credentialValidator != nil {
+		return s.credentialValidator(ctx, prov, cfg)
+	}
+
+	var opts provider.Options
+	switch prov {
+	case "aws":
+		awsCfg, ok := cfg.(AWSCredConfig)
+		if !ok {
+			return fmt.Errorf("invalid AWS credential configuration")
+		}
+		opts.AWSRegions = awsCfg.Regions
+		if awsCfg.AccessKeyID != "" {
+			opts.AWSCreds = &provider.AWSCredentials{
+				AccessKeyID:     awsCfg.AccessKeyID,
+				SecretAccessKey: awsCfg.SecretAccessKey,
+				SessionToken:    awsCfg.SessionToken,
+			}
+		}
+	case "gcp":
+		gcpCfg, ok := cfg.(GCPCredConfig)
+		if !ok {
+			return fmt.Errorf("invalid GCP credential configuration")
+		}
+		opts.GCPProject = gcpCfg.ProjectID
+		if gcpCfg.ServiceAccountKey != "" {
+			opts.GCPCreds = &provider.GCPCredentials{
+				ServiceAccountJSON: gcpCfg.ServiceAccountKey,
+			}
+		}
+	case "azure":
+		azureCfg, ok := cfg.(AzureCredConfig)
+		if !ok {
+			return fmt.Errorf("invalid Azure credential configuration")
+		}
+		opts.AzureSubscription = azureCfg.SubscriptionID
+		if azureCfg.ClientID != "" {
+			opts.AzureCreds = &provider.AzureCredentials{
+				ClientID:     azureCfg.ClientID,
+				ClientSecret: azureCfg.ClientSecret,
+				TenantID:     azureCfg.TenantID,
+			}
+		}
+	default:
+		return fmt.Errorf("invalid provider: %s", prov)
+	}
+
+	providers, err := provider.Build(ctx, opts)
+	if err != nil {
+		return err
+	}
+	for _, cloudProvider := range providers {
+		if _, err := cloudProvider.ListClusters(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Server) handleDeleteCredentials(w http.ResponseWriter, r *http.Request) {

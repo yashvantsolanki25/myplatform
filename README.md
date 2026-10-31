@@ -13,6 +13,10 @@ included Compose setup starts MySQL and the application:
 Open <http://localhost:8080>, create an account, and add AWS, GCP, or Azure
 credentials from **Cloud Credentials**. Account passwords are stored as bcrypt
 hashes; cloud credential payloads are AES-256-GCM encrypted before being saved.
+Saving cloud credentials first verifies that the configured identity can list
+clusters in the selected regions, project, or subscription. The identity needs
+the corresponding EKS, GKE, or AKS cluster-list permission; failed verification
+does not replace previously saved credentials.
 The app's `app-data` volume contains the encryption key when
 `MYPLATFORM_ENCRYPTION_KEY` is unset, so preserve it together with the MySQL
 volume to keep existing credentials readable.

@@ -208,7 +208,7 @@
       <!-- AWS -->
       <div class="cred-section" data-cloud="aws">
         <div class="cred-header"><div class="cred-dot aws"></div><span class="cred-title">Amazon Web Services (EKS)</span><span class="cred-status unconfigured" id="awsCredStatus">Not set</span></div>
-        <p class="cred-help">Enter access keys, or leave them blank to use the app's AWS runtime identity. At least one region is required.</p>
+        <p class="cred-help">Enter access keys, or leave them blank to use the app's AWS runtime identity. At least one region is required. Save verifies EKS access before storing credentials.</p>
         <div class="cred-form-grid">
           <div class="field"><label>Access Key ID</label><input type="text" id="awsAccessKey" placeholder="AKIA..." autocomplete="off" spellcheck="false" /></div>
           <div class="field"><label>Secret Access Key</label><input type="password" id="awsSecretKey" placeholder="••••••••" autocomplete="off" /></div>
@@ -216,7 +216,7 @@
           <div class="field"><label>Regions <span class="field-hint">(comma-separated)</span></label><input type="text" id="awsRegions" placeholder="eu-west-1, us-east-1" autocomplete="off" /></div>
         </div>
         <div class="cred-actions">
-          <button type="button" class="btn btn-primary btn-sm" id="saveAwsBtn">Save AWS</button>
+          <button type="button" class="btn btn-primary btn-sm" id="saveAwsBtn">Verify &amp; Save AWS</button>
           <button type="button" class="btn btn-secondary btn-sm" id="removeAwsBtn">Remove</button>
         </div>
       </div>
@@ -224,11 +224,11 @@
       <!-- GCP -->
       <div class="cred-section" data-cloud="gcp">
         <div class="cred-header"><div class="cred-dot gcp"></div><span class="cred-title">Google Cloud Platform (GKE)</span><span class="cred-status unconfigured" id="gcpCredStatus">Not set</span></div>
-        <p class="cred-help">Paste a service account JSON key, or leave it blank to use the app's Google Application Default Credentials. Run <code>gcloud iam service-accounts keys create</code> to generate a key.</p>
+        <p class="cred-help">Paste a service account JSON key, or leave it blank to use the app's Google Application Default Credentials. Save verifies GKE access before storing credentials. Run <code>gcloud iam service-accounts keys create</code> to generate a key.</p>
         <div class="field"><label>Service Account JSON</label><textarea id="gcpServiceAccount" rows="5" placeholder='{"type":"service_account","project_id":"..."}' spellcheck="false"></textarea></div>
         <div class="field"><label>Project ID</label><input type="text" id="gcpProjectId" placeholder="my-project-id" autocomplete="off" spellcheck="false" /></div>
         <div class="cred-actions">
-          <button type="button" class="btn btn-primary btn-sm" id="saveGcpBtn">Save GCP</button>
+          <button type="button" class="btn btn-primary btn-sm" id="saveGcpBtn">Verify &amp; Save GCP</button>
           <button type="button" class="btn btn-secondary btn-sm" id="removeGcpBtn">Remove</button>
         </div>
       </div>
@@ -236,7 +236,7 @@
       <!-- Azure -->
       <div class="cred-section" data-cloud="azure">
         <div class="cred-header"><div class="cred-dot azure"></div><span class="cred-title">Microsoft Azure (AKS)</span><span class="cred-status unconfigured" id="azureCredStatus">Not set</span></div>
-        <p class="cred-help">Enter a service principal, or leave its fields blank to use the app's Azure runtime identity. A subscription ID is always required. Create a service principal with <code>az ad sp create-for-rbac</code>.</p>
+        <p class="cred-help">Enter a service principal, or leave its fields blank to use the app's Azure runtime identity. A subscription ID is always required. Save verifies AKS access before storing credentials. Create a service principal with <code>az ad sp create-for-rbac</code>.</p>
         <div class="cred-form-grid">
           <div class="field"><label>Client ID</label><input type="text" id="azureClientId" placeholder="00000000-0000-..." autocomplete="off" spellcheck="false" /></div>
           <div class="field"><label>Client Secret</label><input type="password" id="azureClientSecret" placeholder="••••••••" autocomplete="off" /></div>
@@ -244,7 +244,7 @@
           <div class="field"><label>Subscription ID</label><input type="text" id="azureSubscriptionId" placeholder="00000000-0000-..." autocomplete="off" spellcheck="false" /></div>
         </div>
         <div class="cred-actions">
-          <button type="button" class="btn btn-primary btn-sm" id="saveAzureBtn">Save Azure</button>
+          <button type="button" class="btn btn-primary btn-sm" id="saveAzureBtn">Verify &amp; Save Azure</button>
           <button type="button" class="btn btn-secondary btn-sm" id="removeAzureBtn">Remove</button>
         </div>
       </div>

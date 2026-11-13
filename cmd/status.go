@@ -34,24 +34,29 @@ var statusCmd = &cobra.Command{
 		}
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
-		fmt.Fprintln(w, "CLUSTER\tREADY\tUP-TO-DATE\tDETAIL")
+		fmt.Fprintln(w, "CLUSTER\tREADY\tUP-TO-DATE\tURL\tDETAIL")
 		for _, t := range targets {
 			cfg, err := t.p.RESTConfig(ctx, t.c)
 			if err != nil {
-				fmt.Fprintf(w, "%s\t-\t-\tauth: %v\n", t.c.Ref(), err)
+				fmt.Fprintf(w, "%s\t-\t-\t\tauth: %v\n", t.c.Ref(), err)
 				continue
 			}
 			cs, err := kubernetes.NewForConfig(cfg)
 			if err != nil {
-				fmt.Fprintf(w, "%s\t-\t-\t%v\n", t.c.Ref(), err)
+				fmt.Fprintf(w, "%s\t-\t-\t\t%v\n", t.c.Ref(), err)
 				continue
 			}
 			st, err := deploy.GetStatus(ctx, cs, statusFlags.namespace, statusFlags.name)
 			if err != nil {
-				fmt.Fprintf(w, "%s\t-\t-\t%v\n", t.c.Ref(), err)
+				fmt.Fprintf(w, "%s\t-\t-\t\t%v\n", t.c.Ref(), err)
 				continue
 			}
-			fmt.Fprintf(w, "%s\t%s\t%d/%d\t\n", t.c.Ref(), st, st.Updated, st.Desired)
+			endpoint, endpointErr := deploy.GetEndpoint(ctx, cs, statusFlags.namespace, statusFlags.name)
+			detail := ""
+			if endpointErr != nil {
+				detail = endpointErr.Error()
+			}
+			fmt.Fprintf(w, "%s\t%s\t%d/%d\t%s\t%s\n", t.c.Ref(), st, st.Updated, st.Desired, endpoint, detail)
 		}
 		return w.Flush()
 	},

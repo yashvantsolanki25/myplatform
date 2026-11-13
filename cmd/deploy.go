@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/example/myplatform/internal/deploy"
@@ -21,6 +22,7 @@ var deployFlags struct {
 	port, replicas         int32
 	env                    []string
 	clusters               []string
+	serviceType            string
 	wait                   time.Duration
 }
 
@@ -41,16 +43,19 @@ func init() {
 	f.Int32Var(&deployFlags.replicas, "replicas", 2, "replicas per cluster")
 	f.StringArrayVarP(&deployFlags.env, "env", "e", nil, "environment variable KEY=VALUE (repeatable)")
 	f.StringSliceVar(&deployFlags.clusters, "cluster", nil, "target cluster, provider/name (repeatable, required)")
-	f.DurationVar(&deployFlags.wait, "wait", 2*time.Minute, "max time to wait for rollout (0 = don't wait)")
+	f.StringVar(&deployFlags.serviceType, "service-type", string(corev1.ServiceTypeLoadBalancer),
+		"service exposure: LoadBalancer (public URL) or ClusterIP (cluster-internal)")
+	f.DurationVar(&deployFlags.wait, "wait", 5*time.Minute, "max time to wait for rollout and load balancer URL (0 = don't wait)")
 	_ = deployCmd.MarkFlagRequired("name")
 	_ = deployCmd.MarkFlagRequired("image")
 	_ = deployCmd.MarkFlagRequired("cluster")
 }
 
 type result struct {
-	ref    string
-	status deploy.Status
-	err    error
+	ref      string
+	status   deploy.Status
+	endpoint string
+	err      error
 }
 
 func runDeploy(cmd *cobra.Command, _ []string) error {
@@ -59,6 +64,10 @@ func runDeploy(cmd *cobra.Command, _ []string) error {
 	envMap, err := parseEnv(deployFlags.env)
 	if err != nil {
 		return err
+	}
+	serviceType := corev1.ServiceType(deployFlags.serviceType)
+	if serviceType != corev1.ServiceTypeLoadBalancer && serviceType != corev1.ServiceTypeClusterIP {
+		return fmt.Errorf("invalid --service-type %q (want LoadBalancer or ClusterIP)", deployFlags.serviceType)
 	}
 	provs, err := buildProviders(ctx)
 	if err != nil {
@@ -70,12 +79,13 @@ func runDeploy(cmd *cobra.Command, _ []string) error {
 	}
 
 	spec := deploy.Spec{
-		Name:      deployFlags.name,
-		Namespace: deployFlags.namespace,
-		Image:     deployFlags.image,
-		Port:      deployFlags.port,
-		Replicas:  deployFlags.replicas,
-		Env:       envMap,
+		Name:        deployFlags.name,
+		Namespace:   deployFlags.namespace,
+		Image:       deployFlags.image,
+		Port:        deployFlags.port,
+		Replicas:    deployFlags.replicas,
+		Env:         envMap,
+		ServiceType: serviceType,
 	}
 
 	// One goroutine per cluster. A failure in one never aborts the others,
@@ -116,20 +126,27 @@ func deployOne(ctx context.Context, t target, spec deploy.Spec, wait time.Durati
 	} else {
 		r.status, r.err = deploy.GetStatus(ctx, cs, spec.Namespace, spec.Name)
 	}
+	if r.err == nil && spec.ServiceType == corev1.ServiceTypeLoadBalancer {
+		if wait > 0 {
+			r.endpoint, r.err = deploy.WaitForEndpoint(ctx, cs, spec.Namespace, spec.Name, wait)
+		} else {
+			r.endpoint, r.err = deploy.GetEndpoint(ctx, cs, spec.Namespace, spec.Name)
+		}
+	}
 	return r
 }
 
 func report(results []result) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
-	fmt.Fprintln(w, "CLUSTER\tRESULT\tREADY\tDETAIL")
+	fmt.Fprintln(w, "CLUSTER\tRESULT\tREADY\tURL\tDETAIL")
 	var failed []string
 	for _, r := range results {
 		if r.err != nil {
 			failed = append(failed, r.ref)
-			fmt.Fprintf(w, "%s\tFAILED\t%s\t%v\n", r.ref, r.status, r.err)
+			fmt.Fprintf(w, "%s\tFAILED\t%s\t%s\t%v\n", r.ref, r.status, r.endpoint, r.err)
 			continue
 		}
-		fmt.Fprintf(w, "%s\tOK\t%s\t\n", r.ref, r.status)
+		fmt.Fprintf(w, "%s\tOK\t%s\t%s\t\n", r.ref, r.status, r.endpoint)
 	}
 	if err := w.Flush(); err != nil {
 		return err

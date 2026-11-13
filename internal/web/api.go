@@ -14,6 +14,7 @@ import (
 	"github.com/example/myplatform/internal/deploy"
 	"github.com/example/myplatform/internal/provider"
 	"golang.org/x/oauth2/google"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -203,10 +204,11 @@ func (s *Server) handleClusters(w http.ResponseWriter, r *http.Request) {
 // --- deploy job management ---
 
 type jobResult struct {
-	Ref   string `json:"ref"`
-	OK    bool   `json:"ok"`
-	Ready string `json:"ready"`
-	Error string `json:"error,omitempty"`
+	Ref      string `json:"ref"`
+	OK       bool   `json:"ok"`
+	Ready    string `json:"ready"`
+	Endpoint string `json:"endpoint,omitempty"`
+	Error    string `json:"error,omitempty"`
 }
 
 type job struct {
@@ -259,14 +261,15 @@ func (j *job) snapshot() job {
 }
 
 type deployRequest struct {
-	Name      string            `json:"name"`
-	Image     string            `json:"image"`
-	Namespace string            `json:"namespace"`
-	Port      int32             `json:"port"`
-	Replicas  int32             `json:"replicas"`
-	Env       map[string]string `json:"env"`
-	Clusters  []string          `json:"clusters"`
-	Wait      string            `json:"wait"`
+	Name        string            `json:"name"`
+	Image       string            `json:"image"`
+	Namespace   string            `json:"namespace"`
+	Port        int32             `json:"port"`
+	Replicas    int32             `json:"replicas"`
+	ServiceType string            `json:"serviceType"`
+	Env         map[string]string `json:"env"`
+	Clusters    []string          `json:"clusters"`
+	Wait        string            `json:"wait"`
 }
 
 func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
@@ -293,9 +296,24 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	if req.Replicas == 0 {
 		req.Replicas = 2
 	}
-	wait, err := time.ParseDuration(req.Wait)
-	if err != nil || wait == 0 {
-		wait = 2 * time.Minute
+	if req.ServiceType == "" {
+		req.ServiceType = string(corev1.ServiceTypeLoadBalancer)
+	}
+	if req.ServiceType != string(corev1.ServiceTypeLoadBalancer) &&
+		req.ServiceType != string(corev1.ServiceTypeClusterIP) {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("serviceType must be LoadBalancer or ClusterIP"))
+		return
+	}
+	wait := 5 * time.Minute
+	if req.Wait != "" {
+		requestedWait, err := time.ParseDuration(req.Wait)
+		if err != nil || requestedWait < 0 {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("wait must be a non-negative duration"))
+			return
+		}
+		if requestedWait > 0 {
+			wait = requestedWait
+		}
 	}
 
 	ctx := r.Context()
@@ -323,12 +341,13 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	jobsMu.Unlock()
 
 	spec := deploy.Spec{
-		Name:      req.Name,
-		Namespace: req.Namespace,
-		Image:     req.Image,
-		Port:      req.Port,
-		Replicas:  req.Replicas,
-		Env:       req.Env,
+		Name:        req.Name,
+		Namespace:   req.Namespace,
+		Image:       req.Image,
+		Port:        req.Port,
+		Replicas:    req.Replicas,
+		Env:         req.Env,
+		ServiceType: corev1.ServiceType(req.ServiceType),
 	}
 
 	go s.runJob(s.ctx, j, targets, spec, wait)
@@ -370,8 +389,15 @@ func (s *Server) runJob(ctx context.Context, j *job, targets []target, spec depl
 			if err != nil {
 				r.Error = err.Error()
 			} else {
-				r.OK = true
 				r.Ready = st.String()
+				if spec.ServiceType == corev1.ServiceTypeLoadBalancer {
+					r.Endpoint, err = deploy.WaitForEndpoint(ctx, cs, spec.Namespace, spec.Name, wait)
+				}
+				if err != nil {
+					r.Error = err.Error()
+				} else {
+					r.OK = true
+				}
 			}
 			j.addResult(r)
 		}(t)
@@ -401,11 +427,13 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 }
 
 type statusOut struct {
-	Ref     string `json:"ref"`
-	Ready   string `json:"ready"`
-	Updated int32  `json:"updated"`
-	Desired int32  `json:"desired"`
-	Error   string `json:"error,omitempty"`
+	Ref           string `json:"ref"`
+	Ready         string `json:"ready"`
+	Updated       int32  `json:"updated"`
+	Desired       int32  `json:"desired"`
+	Endpoint      string `json:"endpoint,omitempty"`
+	Error         string `json:"error,omitempty"`
+	EndpointError string `json:"endpointError,omitempty"`
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -464,6 +492,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		so.Ready = st.String()
 		so.Updated = st.Updated
 		so.Desired = st.Desired
+		so.Endpoint, err = deploy.GetEndpoint(ctx, cs, ns, name)
+		if err != nil {
+			so.EndpointError = err.Error()
+		}
 		out = append(out, so)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"statuses": out})

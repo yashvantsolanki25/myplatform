@@ -7,6 +7,13 @@
 # Coverage output
 *.out
 
+# Terraform state, plans, credentials, and provider caches
+infra/**/.terraform/
+infra/**/*.tfstate*
+infra/**/*.tfplan
+infra/**/*.tfvars
+infra/**/*.tfvars.json
+
 # Go workspace files
 go.work
 go.work.sum

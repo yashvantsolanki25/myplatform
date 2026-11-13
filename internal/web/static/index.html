@@ -81,22 +81,32 @@
         </div>
       </div>
 
-      <nav class="tabs" role="tablist">
-        <button class="tab active" data-tab="clusters" role="tab">
+      <nav class="tabs" role="tablist" aria-label="Main navigation">
+        <button class="tab active" id="dashboardTab" data-tab="dashboard" role="tab" aria-selected="true" aria-controls="dashboardView">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M2 7.5 8 2l6 5.5V14h-4V9H6v5H2z"/>
+          </svg>Dashboard
+        </button>
+        <button class="tab" id="clustersTab" data-tab="clusters" role="tab" aria-selected="false" aria-controls="clustersView">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
             <rect x="1.5" y="1.5" width="5" height="5" rx="1"/><rect x="9.5" y="1.5" width="5" height="5" rx="1"/>
             <rect x="1.5" y="9.5" width="5" height="5" rx="1"/><rect x="9.5" y="9.5" width="5" height="5" rx="1"/>
           </svg>Clusters
         </button>
-        <button class="tab" data-tab="deploy" role="tab">
+        <button class="tab" id="deployTab" data-tab="deploy" role="tab" aria-selected="false" aria-controls="deployView">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
             <path d="M8 2 L8 11 M4.5 7.5 L8 11 L11.5 7.5 M2 14 L14 14"/>
           </svg>Deploy
         </button>
-        <button class="tab" data-tab="status" role="tab">
+        <button class="tab" id="statusTab" data-tab="status" role="tab" aria-selected="false" aria-controls="statusView">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
             <circle cx="8" cy="8" r="6"/><path d="M8 4.5 L8 8 L10.5 9.5"/>
           </svg>Status
+        </button>
+        <button class="tab" id="profileTab" data-tab="profile" role="tab" aria-selected="false" aria-controls="profileView">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="8" cy="5" r="2.5"/><path d="M3 14c.4-2.5 2.2-4 5-4s4.6 1.5 5 4"/>
+          </svg>Profile
         </button>
       </nav>
 
@@ -112,7 +122,7 @@
             <path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>
           </svg>
         </button>
-        <div class="user-chip" id="userChip"></div>
+        <button class="user-chip" id="userChip" type="button" aria-label="Open profile"></button>
         <button class="icon-btn" id="logoutBtn" title="Sign out">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/>
@@ -122,8 +132,42 @@
     </header>
 
     <main class="main">
+      <!-- Dashboard View -->
+      <section id="dashboardView" class="view active" role="tabpanel" aria-labelledby="dashboardTab">
+        <div class="dashboard-welcome">
+          <div>
+            <p class="eyebrow">OVERVIEW</p>
+            <h1>Welcome back, <span id="dashboardGreeting">there</span></h1>
+            <p class="view-desc">Here’s what’s happening across your cloud infrastructure.</p>
+          </div>
+          <button class="btn btn-primary" type="button" data-go-tab="deploy">＋ New deployment</button>
+        </div>
+        <div id="dashboardStats" class="dashboard-stats" aria-live="polite"></div>
+        <div class="dashboard-grid">
+          <section class="card dashboard-panel">
+            <div class="panel-heading">
+              <div><h2>Cluster overview</h2><p class="panel-desc">Your Kubernetes clusters across providers</p></div>
+              <button class="btn-link" type="button" data-go-tab="clusters">View all</button>
+            </div>
+            <div id="dashboardClusters" class="dashboard-clusters"></div>
+          </section>
+          <section class="card dashboard-panel">
+            <div class="panel-heading">
+              <div><h2>Cloud providers</h2><p class="panel-desc">Credential connection status</p></div>
+              <button class="btn-link" type="button" id="dashboardConfigBtn">Manage</button>
+            </div>
+            <div id="dashboardProviders" class="dashboard-providers"></div>
+          </section>
+        </div>
+        <section class="dashboard-tip">
+          <div class="tip-mark" aria-hidden="true">✦</div>
+          <div><h2>Ready to ship something?</h2><p>Deploy an application to one or more clusters from a single place.</p></div>
+          <button class="btn btn-secondary" type="button" data-go-tab="deploy">Go to deploy</button>
+        </section>
+      </section>
+
       <!-- Clusters View -->
-      <section id="clustersView" class="view active">
+      <section id="clustersView" class="view" role="tabpanel" aria-labelledby="clustersTab">
         <div class="view-header"><div><h2>Clusters</h2><p class="view-desc">Kubernetes clusters discovered across all configured clouds</p></div></div>
         <div id="clusterSummary" class="summary-row"></div>
         <div id="clusterGrid" class="cluster-grid">
@@ -144,7 +188,7 @@
       </section>
 
       <!-- Deploy View -->
-      <section id="deployView" class="view">
+      <section id="deployView" class="view" role="tabpanel" aria-labelledby="deployTab">
         <div class="view-header"><div><h2>Deploy</h2><p class="view-desc">Deploy an application to one or more clusters in parallel</p></div></div>
         <div class="deploy-layout">
           <form id="deployForm" class="card deploy-form">
@@ -157,6 +201,13 @@
                 <div><label for="dPort">Container Port</label><input type="number" id="dPort" value="8080" min="1" max="65535" /></div>
                 <div><label for="dReplicas">Replicas</label><input type="number" id="dReplicas" value="2" min="1" max="100" /></div>
               </div>
+            </div>
+            <div class="field">
+              <label for="dServiceType">Service exposure</label>
+              <select id="dServiceType">
+                <option value="LoadBalancer">Public load balancer — returns a URL (cloud charges may apply)</option>
+                <option value="ClusterIP">Cluster-internal only — no public URL</option>
+              </select>
             </div>
             <div class="field">
               <label>Environment Variables</label>
@@ -177,7 +228,7 @@
       </section>
 
       <!-- Status View -->
-      <section id="statusView" class="view">
+      <section id="statusView" class="view" role="tabpanel" aria-labelledby="statusTab">
         <div class="view-header"><div><h2>Status</h2><p class="view-desc">Check rollout status for an application across clusters</p></div></div>
         <div class="card status-controls">
           <div class="form-inline">
@@ -190,6 +241,35 @@
           </div>
         </div>
         <div id="statusResults" class="status-results"></div>
+      </section>
+
+      <!-- Profile View -->
+      <section id="profileView" class="view" role="tabpanel" aria-labelledby="profileTab">
+        <div class="view-header">
+          <div><p class="eyebrow">YOUR ACCOUNT</p><h2>Profile</h2><p class="view-desc">Your account details and connected cloud providers.</p></div>
+        </div>
+        <section class="card profile-card">
+          <div class="profile-identity">
+            <div class="profile-avatar" id="profileAvatar" aria-hidden="true">?</div>
+            <div><h3 id="profileName">Account</h3><p id="profileEmail" class="profile-email"></p></div>
+          </div>
+          <div class="profile-details">
+            <div class="profile-detail"><span>Full name</span><strong id="profileDetailName">—</strong></div>
+            <div class="profile-detail"><span>Email address</span><strong id="profileDetailEmail">—</strong></div>
+            <div class="profile-detail"><span>Account ID</span><strong id="profileDetailId">—</strong></div>
+          </div>
+        </section>
+        <section class="card profile-clouds">
+          <div class="panel-heading">
+            <div><h2>Cloud connections</h2><p class="panel-desc">Manage the providers available to your account.</p></div>
+            <button class="btn btn-secondary btn-sm" type="button" id="profileCredentialsBtn">Manage credentials</button>
+          </div>
+          <div id="profileProviders" class="dashboard-providers"></div>
+        </section>
+        <section class="profile-signout">
+          <div><h2>Sign out</h2><p class="panel-desc">End your current session on this device.</p></div>
+          <button class="btn btn-secondary" type="button" id="profileLogoutBtn">Sign out</button>
+        </section>
       </section>
     </main>
   </div>

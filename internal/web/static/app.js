@@ -7,10 +7,15 @@ const PROV_LABELS = { aws: 'AWS', gcp: 'GCP', azure: 'Azure' };
 
 const state = {
   clusters: [],
+  clustersLoaded: false,
+  clusterLoadError: '',
   warnings: [],
   creds: {},
+  credentialsLoaded: false,
+  credentialsLoadError: '',
   user: null,
   token: null,
+  authVersion: 0,
   selectedClusters: new Set(),
   jobPollTimer: null,
   statusPollTimer: null,
@@ -21,8 +26,8 @@ function $(s, r = document) { return r.querySelector(s); }
 function $$(s, r = document) { return [...r.querySelectorAll(s)]; }
 
 function getToken() { return localStorage.getItem('mp_token'); }
-function setToken(t) { localStorage.setItem('mp_token', t); state.token = t; }
-function clearToken() { localStorage.removeItem('mp_token'); state.token = null; }
+function setToken(t) { localStorage.setItem('mp_token', t); state.token = t; state.authVersion++; }
+function clearToken() { localStorage.removeItem('mp_token'); state.token = null; state.authVersion++; }
 
 function authHeaders() {
   const t = getToken();
@@ -46,6 +51,11 @@ function statusClass(s) {
 }
 
 function parseRef(ref) { const [p, ...r] = ref.split('/'); return { prov: p, name: r.join('/') }; }
+function escapeHTML(value) {
+  return String(value).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[c]);
+}
 
 // ─── API (authenticated) ───────────────────────────
 async function api(path, opts = {}) {
@@ -77,6 +87,15 @@ const API = {
 // ─── Auth ──────────────────────────────────────────
 function showAuth() {
   clearToken();
+  state.user = null;
+  state.clusters = [];
+  state.clustersLoaded = false;
+  state.clusterLoadError = '';
+  state.warnings = [];
+  state.creds = {};
+  state.credentialsLoaded = false;
+  state.credentialsLoadError = '';
+  state.selectedClusters.clear();
   $('#authView').classList.remove('hidden');
   $('#appShell').classList.add('hidden');
   if (state.jobPollTimer) clearInterval(state.jobPollTimer);
@@ -148,10 +167,7 @@ function initAuth() {
   });
 
   // Logout
-  $('#logoutBtn').addEventListener('click', () => {
-    showAuth();
-    toast('Signed out', 'info');
-  });
+  $('#logoutBtn').addEventListener('click', signOut);
 }
 
 // ─── App init (after auth) ─────────────────────────
@@ -166,8 +182,16 @@ function initApp() {
     initSettings();
     $('#refreshBtn').addEventListener('click', loadClusters);
     $('#emptyConfigBtn').addEventListener('click', openSettings);
+    $('#dashboardConfigBtn').addEventListener('click', openSettings);
+    $('#profileCredentialsBtn').addEventListener('click', openSettings);
+    $('#userChip').addEventListener('click', () => activateTab('profile'));
+    $('#profileLogoutBtn').addEventListener('click', signOut);
+    $$('[data-go-tab]').forEach(button => {
+      button.addEventListener('click', () => activateTab(button.dataset.goTab));
+    });
     appInited = true;
   }
+  renderDashboard();
   loadCredentials();
   loadClusters();
 }
@@ -181,18 +205,110 @@ function updateUserChip() {
   const label = document.createElement('span');
   label.textContent = state.user?.name || state.user?.email || '';
   chip.replaceChildren(avatar, label);
+  renderProfile();
 }
 
 // ─── Tabs ──────────────────────────────────────────
 function initTabs() {
   $$('.tab').forEach(tab => {
     tab.addEventListener('click', () => {
-      $$('.tab').forEach(t => t.classList.remove('active'));
-      $$('.view').forEach(v => v.classList.remove('active'));
-      tab.classList.add('active');
-      $(`#${tab.dataset.tab}View`).classList.add('active');
+      activateTab(tab.dataset.tab);
     });
   });
+  activateTab('dashboard');
+}
+
+function activateTab(name) {
+  $$('.tab').forEach(tab => {
+    const active = tab.dataset.tab === name;
+    tab.classList.toggle('active', active);
+    tab.setAttribute('aria-selected', String(active));
+  });
+  $$('.view').forEach(view => {
+    const active = view.id === `${name}View`;
+    view.classList.toggle('active', active);
+    view.setAttribute('aria-hidden', String(!active));
+  });
+}
+
+function signOut() {
+  showAuth();
+  toast('Signed out', 'info');
+}
+
+function renderDashboard() {
+  const total = state.clusters.length;
+  const healthy = state.clusters.filter(cluster => statusClass(cluster.status) === 'active').length;
+  const attention = state.clusters.filter(cluster => ['failed', 'unknown'].includes(statusClass(cluster.status))).length;
+  const configured = PROVIDERS.filter(provider => state.creds[provider]?.configured).length;
+  const firstName = (state.user?.name || '').trim().split(/\s+/)[0] || 'there';
+  $('#dashboardGreeting').textContent = firstName;
+  const stats = [
+    { label: 'Total clusters', value: state.clustersLoaded ? total : '—', detail: state.clusterLoadError || (state.clustersLoaded ? 'Across all providers' : 'Loading clusters…'), tone: 'blue', icon: '▦' },
+    { label: 'Healthy', value: state.clustersLoaded ? healthy : '—', detail: state.clusterLoadError || (total ? `${Math.round(healthy / total * 100)}% of clusters` : state.clustersLoaded ? 'No clusters discovered' : 'Loading clusters…'), tone: 'green', icon: '✓' },
+    { label: 'Needs attention', value: state.clustersLoaded ? attention : '—', detail: state.clusterLoadError || (attention ? 'Review cluster status' : total ? 'No clusters require review' : state.clustersLoaded ? 'No clusters discovered' : 'Loading clusters…'), tone: attention ? 'amber' : 'green', icon: '!' },
+    { label: 'Cloud providers', value: state.credentialsLoaded && !state.credentialsLoadError ? `${configured}/3` : '—', detail: state.credentialsLoadError || (state.credentialsLoaded ? 'Connected accounts' : 'Checking providers…'), tone: 'purple', icon: '⌘' },
+  ];
+  $('#dashboardStats').innerHTML = stats.map(stat => `
+    <article class="dashboard-stat">
+      <div class="stat-top"><span class="stat-icon ${stat.tone}" aria-hidden="true">${stat.icon}</span><span class="stat-label">${stat.label}</span></div>
+      <strong class="stat-value">${escapeHTML(stat.value)}</strong>
+      <span class="stat-detail">${escapeHTML(stat.detail)}</span>
+    </article>`).join('');
+
+  const clusterList = $('#dashboardClusters');
+  if (!state.clustersLoaded) {
+    clusterList.innerHTML = '<p class="dashboard-loading">Loading your clusters…</p>';
+  } else if (!total) {
+    clusterList.innerHTML = `
+      <div class="dashboard-empty">
+        <span class="empty-icon" aria-hidden="true">⌁</span>
+        <div><strong>${state.clusterLoadError ? 'Cluster list unavailable' : 'No clusters yet'}</strong><p>${escapeHTML(state.clusterLoadError || 'Connect a cloud provider to discover your Kubernetes clusters.')}</p></div>
+        <button class="btn btn-secondary btn-sm" type="button" data-open-settings>Connect a cloud</button>
+      </div>`;
+    if (!state.clusterLoadError) clusterList.querySelector('[data-open-settings]').addEventListener('click', openSettings);
+  } else {
+    clusterList.innerHTML = state.clusters.slice(0, 6).map(cluster => `
+      <button class="dashboard-cluster-row" type="button" data-go-tab="clusters">
+        <span class="cluster-provider-mark ${escapeHTML(cluster.provider)}">${escapeHTML((PROV_LABELS[cluster.provider] || cluster.provider || '?').slice(0, 1).toUpperCase())}</span>
+        <span class="dashboard-cluster-name"><strong>${escapeHTML(cluster.name)}</strong><small>${escapeHTML(PROV_LABELS[cluster.provider] || cluster.provider || 'Cloud')} · ${escapeHTML(cluster.region || 'Region unavailable')}</small></span>
+        <span class="status-badge ${statusClass(cluster.status)}">${escapeHTML(cluster.status || 'Unknown')}</span>
+      </button>`).join('');
+    clusterList.querySelectorAll('[data-go-tab]').forEach(button => {
+      button.addEventListener('click', () => activateTab(button.dataset.goTab));
+    });
+  }
+  renderProviderList($('#dashboardProviders'));
+  renderProfile();
+}
+
+function renderProviderList(container) {
+  container.innerHTML = PROVIDERS.map(provider => {
+    const configured = Boolean(state.creds[provider]?.configured);
+    const unavailable = Boolean(state.credentialsLoadError);
+    const status = unavailable ? 'Unavailable' : !state.credentialsLoaded ? 'Checking' : configured ? 'Connected' : 'Not set';
+    const detail = unavailable ? 'Could not load status' : !state.credentialsLoaded ? 'Checking connection…' : configured ? 'Credentials connected' : 'Not connected';
+    return `
+      <div class="provider-row">
+        <span class="provider-mark ${provider}" aria-hidden="true">${PROV_LABELS[provider].slice(0, 1)}</span>
+        <span class="provider-name">${PROV_LABELS[provider]}<small>${detail}</small></span>
+        <span class="provider-state ${configured && !unavailable ? 'connected' : ''}"><span class="provider-state-dot"></span>${status}</span>
+      </div>`;
+  }).join('');
+}
+
+function renderProfile() {
+  const user = state.user || {};
+  const name = user.name || 'Account';
+  const email = user.email || '—';
+  const initials = name.trim().split(/\s+/).slice(0, 2).map(part => part.charAt(0)).join('').toUpperCase() || '?';
+  $('#profileAvatar').textContent = initials;
+  $('#profileName').textContent = name;
+  $('#profileEmail').textContent = email;
+  $('#profileDetailName').textContent = user.name || '—';
+  $('#profileDetailEmail').textContent = user.email || '—';
+  $('#profileDetailId').textContent = user.id == null ? '—' : String(user.id);
+  renderProviderList($('#profileProviders'));
 }
 
 // ─── Cloud badges (from credentials) ───────────────
@@ -239,8 +355,7 @@ function renderClusters() {
     card.addEventListener('click', () => {
       state.selectedClusters.has(c.ref) ? state.selectedClusters.delete(c.ref) : state.selectedClusters.add(c.ref);
       updatePickerChecks(); updateDeployHint();
-      $$('.tab').forEach(t => t.classList.remove('active')); $$('.view').forEach(v => v.classList.remove('active'));
-      $('[data-tab="deploy"]').classList.add('active'); $('#deployView').classList.add('active');
+      activateTab('deploy');
     });
     grid.appendChild(card);
   });
@@ -249,22 +364,35 @@ function renderClusters() {
 // ─── Load clusters ─────────────────────────────────
 async function loadClusters() {
   const btn = $('#refreshBtn'); btn.classList.add('spinning');
+  const authVersion = state.authVersion;
   try {
     const data = await API.clusters();
+    if (authVersion !== state.authVersion) return;
     if (data.error) {
       $('#clusterSkeleton').classList.add('hidden'); $('#clusterGrid').innerHTML = '';
       const err = $('#clusterConfigError');
       err.classList.remove('hidden');
       err.innerHTML = `<h3>Cloud Not Configured</h3><p>${data.error}</p><button class="btn btn-primary" id="errConfigBtn" style="margin-top:18px">Configure Clouds</button>`;
       $('#errConfigBtn').addEventListener('click', openSettings);
-      state.clusters = []; renderClusterPicker(); return;
+      state.clusters = [];
+      state.clustersLoaded = true;
+      state.clusterLoadError = '';
+      renderClusterPicker(); renderSummary(); renderDashboard(); return;
     }
     $('#clusterConfigError').classList.add('hidden');
     state.clusters = data.clusters || []; state.warnings = data.warnings || [];
-    renderCloudBadges(); renderSummary(); renderClusters(); renderClusterPicker();
+    state.clustersLoaded = true;
+    state.clusterLoadError = '';
+    renderCloudBadges(); renderSummary(); renderClusters(); renderClusterPicker(); renderDashboard();
     if (state.warnings.length) state.warnings.forEach(w => toast(w, 'info', 5000));
     if (state.clusters.length) toast(`Found ${state.clusters.length} cluster${state.clusters.length > 1 ? 's' : ''}`, 'success');
-  } catch (err) { if (state.token) toast('Failed to fetch clusters: ' + err.message, 'error'); }
+  } catch (err) {
+    if (authVersion !== state.authVersion) return;
+    state.clustersLoaded = true;
+    state.clusterLoadError = err.message;
+    renderDashboard();
+    if (state.token) toast('Failed to fetch clusters: ' + err.message, 'error');
+  }
   finally { btn.classList.remove('spinning'); }
 }
 
@@ -331,6 +459,7 @@ function initDeploy() {
       const res = await API.deploy({
         name, image, namespace: $('#dNamespace').value.trim() || 'default',
         port: parseInt($('#dPort').value) || 8080, replicas: parseInt($('#dReplicas').value) || 2,
+        serviceType: $('#dServiceType').value,
         env: collectEnv(), clusters: [...state.selectedClusters],
       });
       if (res.error) { toast(res.error, 'error'); return; }
@@ -351,7 +480,7 @@ function pollJob(jobId, name, image) {
     let h = `<div class="result-card"><div class="result-header"><span class="result-title">${name}</span><span class="result-sub">${image}</span><span class="status-badge ${allDone ? (hasFail ? 'failed' : 'active') : 'provisioning'}">${allDone ? (hasFail ? 'Completed with errors' : 'Success') : 'Deploying'}</span></div><div class="progress-bar"><div class="progress-fill ${pc}" style="width:${pct}%"></div></div>`;
     job.results.forEach(r => {
       const { prov, name: cn } = parseRef(r.ref);
-      h += `<div class="result-row"><div class="rr-ref">${cn}<span class="rr-prov"> · ${PROV_LABELS[prov]}</span></div><div class="rr-status">${r.ready ? `<span class="rr-ready">${r.ready}</span>` : ''}<span class="rr-badge ${r.ok ? 'ok' : 'fail'}">${r.ok ? 'OK' : 'Failed'}</span></div></div>`;
+      h += `<div class="result-row"><div class="rr-ref">${cn}<span class="rr-prov"> · ${PROV_LABELS[prov]}</span></div><div class="rr-status">${r.ready ? `<span class="rr-ready">${r.ready}</span>` : ''}<span class="rr-badge ${r.ok ? 'ok' : 'fail'}">${r.ok ? 'OK' : 'Failed'}</span></div>${r.endpoint ? `<a class="rr-endpoint" href="${escapeHTML(r.endpoint)}" target="_blank" rel="noopener noreferrer">${escapeHTML(r.endpoint)}</a>` : ''}</div>`;
       if (r.error) h += `<div class="rr-error">${r.error}</div>`;
     });
     for (let i = job.results.length; i < total; i++)
@@ -397,11 +526,11 @@ async function checkStatus() {
 function renderStatus(statuses) {
   const el = $('#statusResults');
   if (!statuses.length) { el.innerHTML = '<div class="empty-state"><h3>No results</h3></div>'; return; }
-  let h = '<div class="card" style="padding:0;overflow:hidden"><table class="status-table"><thead><tr><th>Cluster</th><th>Ready</th><th>Up-to-date</th><th>Detail</th></tr></thead><tbody>';
+  let h = '<div class="card" style="padding:0;overflow:hidden"><table class="status-table"><thead><tr><th>Cluster</th><th>Ready</th><th>Up-to-date</th><th>URL</th><th>Detail</th></tr></thead><tbody>';
   statuses.forEach(s => {
     const { prov, name } = parseRef(s.ref);
     const rc = s.error ? 'var(--error)' : s.updated === s.desired && s.desired > 0 ? 'var(--success)' : 'var(--warning)';
-    h += `<tr><td class="st-cluster">${name}<span class="st-prov"> · ${PROV_LABELS[prov]}</span></td><td class="st-ready" style="color:${rc}">${s.ready || '—'}</td><td class="st-ready">${s.error ? '—' : `${s.updated}/${s.desired}`}</td><td class="st-detail">${s.error || ''}</td></tr>`;
+    h += `<tr><td class="st-cluster">${name}<span class="st-prov"> · ${PROV_LABELS[prov]}</span></td><td class="st-ready" style="color:${rc}">${s.ready || '—'}</td><td class="st-ready">${s.error ? '—' : `${s.updated}/${s.desired}`}</td><td>${s.endpoint ? `<a href="${escapeHTML(s.endpoint)}" target="_blank" rel="noopener noreferrer">${escapeHTML(s.endpoint)}</a>` : '—'}</td><td class="st-detail">${s.error || s.endpointError || ''}</td></tr>`;
   });
   el.innerHTML = h + '</tbody></table></div>';
 }
@@ -426,11 +555,16 @@ function openSettings() { $('#settingsModal').classList.remove('hidden'); loadCr
 function closeSettings() { $('#settingsModal').classList.add('hidden'); }
 
 async function loadCredentials() {
+  const authVersion = state.authVersion;
   try {
     const data = await API.getCredentials();
+    if (authVersion !== state.authVersion) return;
     if (data.error) throw new Error(data.error);
     state.creds = data;
+    state.credentialsLoaded = true;
+    state.credentialsLoadError = '';
     renderCloudBadges();
+    renderDashboard();
     // Update status badges
     PROVIDERS.forEach(p => {
       const el = $(`#${p}CredStatus`);
@@ -446,6 +580,10 @@ async function loadCredentials() {
     $('#azureTenantId').value = data.azure?.tenantId || '';
     $('#azureSubscriptionId').value = data.azure?.subscriptionId || '';
   } catch (e) {
+    if (authVersion !== state.authVersion) return;
+    state.credentialsLoaded = true;
+    state.credentialsLoadError = e.message;
+    renderDashboard();
     if (state.token) toast('Could not load cloud credentials: ' + e.message, 'error');
   }
 }

@@ -1,0 +1,227 @@
+---
+- name: Provision a managed Kubernetes cluster and install monitoring
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    cloud_provider: ""
+    cluster_dir: "{{ playbook_dir }}/../terraform/clusters/{{ cloud_provider }}"
+    monitoring_dir: "{{ playbook_dir }}/../terraform"
+    kubeconfig_path: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+    cloud_cli:
+      aws: aws
+      gcp: gcloud
+      azure: az
+  tasks:
+    - name: Validate provider selection
+      ansible.builtin.assert:
+        that:
+          - cloud_provider in ['aws', 'gcp', 'azure']
+        fail_msg: >-
+          Select aws, gcp, or azure. Provisioning creates billable cloud resources.
+
+    - name: Require Terraform, cloud CLI, and Grafana password
+      ansible.builtin.assert:
+        that:
+          - lookup('pipe', 'command -v terraform') | length > 0
+          - lookup('pipe', 'command -v ' + cloud_cli[cloud_provider]) | length > 0
+          - lookup('env', 'TF_VAR_grafana_admin_password') | length >= 12
+        fail_msg: >-
+          Install Terraform and the selected cloud CLI, authenticate it, and set
+          TF_VAR_grafana_admin_password to a password of at least 12 characters.
+
+    - name: Initialize selected provider configuration
+      ansible.builtin.command:
+        argv:
+          - terraform
+          - init
+          - -input=false
+      args:
+        chdir: "{{ cluster_dir }}"
+      changed_when: false
+
+    - name: Create the cluster plan
+      ansible.builtin.command:
+        argv:
+          - terraform
+          - plan
+          - -input=false
+          - -out=tfplan
+      args:
+        chdir: "{{ cluster_dir }}"
+      changed_when: false
+
+    - name: Show cluster plan for review
+      ansible.builtin.command:
+        argv: [terraform, show, -no-color, tfplan]
+      args:
+        chdir: "{{ cluster_dir }}"
+      register: cluster_plan
+      changed_when: false
+
+    - name: Review cluster changes
+      ansible.builtin.debug:
+        var: cluster_plan.stdout_lines
+
+    - name: Confirm cluster creation
+      ansible.builtin.pause:
+        prompt: "Type create to provision this cluster and incur cloud charges"
+      register: cluster_confirmation
+
+    - name: Require explicit cluster confirmation
+      ansible.builtin.assert:
+        that:
+          - cluster_confirmation.user_input == 'create'
+        fail_msg: "Cluster provisioning cancelled."
+
+    - name: Apply the reviewed cluster plan
+      ansible.builtin.command:
+        argv:
+          - terraform
+          - apply
+          - -input=false
+          - tfplan
+      args:
+        chdir: "{{ cluster_dir }}"
+
+    - name: Read cluster name
+      ansible.builtin.command:
+        argv: [terraform, output, -raw, cluster_name]
+      args:
+        chdir: "{{ cluster_dir }}"
+      register: cluster_name
+      changed_when: false
+
+    - name: Read cluster region
+      ansible.builtin.command:
+        argv: [terraform, output, -raw, region]
+      args:
+        chdir: "{{ cluster_dir }}"
+      register: cluster_region
+      changed_when: false
+      when: cloud_provider in ['aws', 'gcp']
+
+    - name: Configure AWS kubeconfig
+      ansible.builtin.command:
+        argv:
+          - aws
+          - eks
+          - update-kubeconfig
+          - --name
+          - "{{ cluster_name.stdout }}"
+          - --region
+          - "{{ cluster_region.stdout }}"
+      when: cloud_provider == 'aws'
+
+    - name: Read GCP project ID
+      ansible.builtin.command:
+        argv: [terraform, output, -raw, project_id]
+      args:
+        chdir: "{{ cluster_dir }}"
+      register: cluster_project
+      changed_when: false
+      when: cloud_provider == 'gcp'
+
+    - name: Configure GCP kubeconfig
+      ansible.builtin.command:
+        argv:
+          - gcloud
+          - container
+          - clusters
+          - get-credentials
+          - "{{ cluster_name.stdout }}"
+          - --region
+          - "{{ cluster_region.stdout }}"
+          - --project
+          - "{{ cluster_project.stdout }}"
+      when: cloud_provider == 'gcp'
+
+    - name: Read Azure resource group
+      ansible.builtin.command:
+        argv: [terraform, output, -raw, resource_group_name]
+      args:
+        chdir: "{{ cluster_dir }}"
+      register: cluster_resource_group
+      changed_when: false
+      when: cloud_provider == 'azure'
+
+    - name: Configure Azure kubeconfig
+      ansible.builtin.command:
+        argv:
+          - az
+          - aks
+          - get-credentials
+          - --resource-group
+          - "{{ cluster_resource_group.stdout }}"
+          - --name
+          - "{{ cluster_name.stdout }}"
+          - --overwrite-existing
+      when: cloud_provider == 'azure'
+
+    - name: Initialize monitoring Terraform
+      ansible.builtin.command:
+        argv:
+          - terraform
+          - init
+          - -input=false
+      args:
+        chdir: "{{ monitoring_dir }}"
+      changed_when: false
+
+    - name: Plan Prometheus and Grafana installation
+      ansible.builtin.command:
+        argv:
+          - terraform
+          - plan
+          - -input=false
+          - -out=tfplan
+          - -var
+          - "kubeconfig_path={{ kubeconfig_path }}"
+      args:
+        chdir: "{{ monitoring_dir }}"
+      environment:
+        TF_VAR_grafana_admin_password: "{{ lookup('env', 'TF_VAR_grafana_admin_password') }}"
+      changed_when: false
+
+    - name: Show monitoring plan for review
+      ansible.builtin.command:
+        argv: [terraform, show, -no-color, tfplan]
+      args:
+        chdir: "{{ monitoring_dir }}"
+      register: monitoring_plan
+      changed_when: false
+
+    - name: Review monitoring changes
+      ansible.builtin.debug:
+        var: monitoring_plan.stdout_lines
+
+    - name: Confirm monitoring installation
+      ansible.builtin.pause:
+        prompt: "Type apply to install Prometheus and Grafana"
+      register: monitoring_confirmation
+
+    - name: Require explicit monitoring confirmation
+      ansible.builtin.assert:
+        that:
+          - monitoring_confirmation.user_input == 'apply'
+        fail_msg: "Monitoring installation cancelled."
+
+    - name: Install Prometheus and Grafana
+      ansible.builtin.command:
+        argv: [terraform, apply, -input=false, tfplan]
+      args:
+        chdir: "{{ monitoring_dir }}"
+      environment:
+        TF_VAR_grafana_admin_password: "{{ lookup('env', 'TF_VAR_grafana_admin_password') }}"
+
+    - name: Show Grafana access instructions
+      ansible.builtin.command:
+        argv: [terraform, output, -raw, grafana_access_command]
+      args:
+        chdir: "{{ monitoring_dir }}"
+      register: grafana_access_command
+      changed_when: false
+
+    - name: Print Grafana port-forward command
+      ansible.builtin.debug:
+        msg: "{{ grafana_access_command.stdout }}"

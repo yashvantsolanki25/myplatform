@@ -5,6 +5,8 @@ package deploy
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/url"
 	"sort"
 	"time"
 
@@ -17,12 +19,13 @@ import (
 )
 
 type Spec struct {
-	Name      string
-	Namespace string
-	Image     string
-	Port      int32
-	Replicas  int32
-	Env       map[string]string
+	Name        string
+	Namespace   string
+	Image       string
+	Port        int32
+	Replicas    int32
+	Env         map[string]string
+	ServiceType corev1.ServiceType
 }
 
 type Status struct {
@@ -75,6 +78,7 @@ func Apply(ctx context.Context, cs kubernetes.Interface, s Spec) error {
 		// Keep the allocated ClusterIP; only reconcile ports and selector.
 		curSvc.Spec.Ports = wantSvc.Spec.Ports
 		curSvc.Spec.Selector = wantSvc.Spec.Selector
+		curSvc.Spec.Type = wantSvc.Spec.Type
 		_, err = svcs.Update(ctx, curSvc, metav1.UpdateOptions{})
 	}
 	if err != nil {
@@ -114,15 +118,71 @@ func buildDeployment(s Spec) *appsv1.Deployment {
 }
 
 func buildService(s Spec) *corev1.Service {
+	serviceType := s.ServiceType
+	if serviceType == "" {
+		serviceType = corev1.ServiceTypeLoadBalancer
+	}
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: s.Name, Namespace: s.Namespace, Labels: labels(s.Name)},
 		Spec: corev1.ServiceSpec{
+			Type:     serviceType,
 			Selector: map[string]string{"app.kubernetes.io/name": s.Name},
 			Ports: []corev1.ServicePort{{
 				Port:       80,
 				TargetPort: intstr.FromInt32(s.Port),
 			}},
 		},
+	}
+}
+
+// GetEndpoint returns the public HTTP URL assigned to a LoadBalancer Service.
+func GetEndpoint(ctx context.Context, cs kubernetes.Interface, ns, name string) (string, error) {
+	svc, err := cs.CoreV1().Services(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("service: %w", err)
+	}
+	if svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
+		return "", nil
+	}
+	for _, ingress := range svc.Status.LoadBalancer.Ingress {
+		host := ingress.Hostname
+		if host == "" {
+			host = ingress.IP
+		}
+		if host == "" {
+			continue
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+			host = "[" + host + "]"
+		}
+		return (&url.URL{Scheme: "http", Host: host}).String(), nil
+	}
+	return "", nil
+}
+
+// WaitForEndpoint waits until a LoadBalancer Service has an address or times out.
+func WaitForEndpoint(ctx context.Context, cs kubernetes.Interface, ns, name string, timeout time.Duration) (string, error) {
+	if timeout <= 0 {
+		return GetEndpoint(ctx, cs, ns, name)
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	tick := time.NewTicker(2 * time.Second)
+	defer tick.Stop()
+	for {
+		endpoint, err := GetEndpoint(ctx, cs, ns, name)
+		if err != nil {
+			return "", err
+		}
+		if endpoint != "" {
+			return endpoint, nil
+		}
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("timed out waiting for a public load balancer address")
+		case <-tick.C:
+		}
 	}
 }
 

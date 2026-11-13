@@ -1,0 +1,89 @@
+---
+- name: Install myplatform monitoring on the selected Kubernetes cluster
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    terraform_dir: "{{ playbook_dir }}/../terraform"
+    kubeconfig_path: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+    grafana_password: "{{ lookup('env', 'TF_VAR_grafana_admin_password') }}"
+  tasks:
+    - name: Require Terraform and kubectl
+      ansible.builtin.assert:
+        that:
+          - lookup('pipe', 'command -v terraform') | length > 0
+          - lookup('pipe', 'command -v kubectl') | length > 0
+          - grafana_password | length >= 12
+        fail_msg: >-
+          Install Terraform and kubectl, select the target cluster with KUBECONFIG,
+          and set TF_VAR_grafana_admin_password to a password of at least 12 characters.
+
+    - name: Verify the selected Kubernetes context
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ kubeconfig_path }}"
+          - config
+          - current-context
+      changed_when: false
+
+    - name: Initialize Terraform
+      ansible.builtin.command:
+        argv:
+          - terraform
+          - init
+          - -input=false
+      args:
+        chdir: "{{ terraform_dir }}"
+      changed_when: false
+
+    - name: Create monitoring plan
+      ansible.builtin.command:
+        argv:
+          - terraform
+          - plan
+          - -input=false
+          - -out=tfplan
+          - -var
+          - "kubeconfig_path={{ kubeconfig_path }}"
+      args:
+        chdir: "{{ terraform_dir }}"
+      environment:
+        TF_VAR_grafana_admin_password: "{{ grafana_password }}"
+      changed_when: false
+
+    - name: Show monitoring plan for review
+      ansible.builtin.command:
+        argv: [terraform, show, -no-color, tfplan]
+      args:
+        chdir: "{{ terraform_dir }}"
+      register: monitoring_plan
+      changed_when: false
+
+    - name: Review monitoring changes
+      ansible.builtin.debug:
+        var: monitoring_plan.stdout_lines
+
+    - name: Confirm monitoring changes
+      ansible.builtin.pause:
+        prompt: "Type apply to install or update Prometheus and Grafana"
+      register: monitoring_confirmation
+
+    - name: Require explicit monitoring confirmation
+      ansible.builtin.assert:
+        that:
+          - monitoring_confirmation.user_input == 'apply'
+        fail_msg: "Monitoring installation cancelled."
+
+    - name: Install or update Prometheus and Grafana
+      ansible.builtin.command:
+        argv:
+          - terraform
+          - apply
+          - -input=false
+          - tfplan
+      args:
+        chdir: "{{ terraform_dir }}"
+      environment:
+        TF_VAR_grafana_admin_password: "{{ grafana_password }}"

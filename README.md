@@ -11,7 +11,11 @@ included Compose setup starts MySQL and the application:
     docker compose --env-file .env.example up --build
 
 Open <http://localhost:8080>, create an account, and add AWS, GCP, or Azure
-credentials from **Cloud Credentials**. Account passwords are stored as bcrypt
+credentials from **Cloud Credentials**. Choose discovered clusters by provider
+in the Deploy form. Public LoadBalancer exposure is selected by default and
+the job result includes its HTTP URL when the cloud assigns an address; select
+ClusterIP for cluster-internal-only services. Public load balancers can incur
+cloud charges. Account passwords are stored as bcrypt
 hashes; cloud credential payloads are AES-256-GCM encrypted before being saved.
 Saving cloud credentials first verifies that the configured identity can list
 clusters in the selected regions, project, or subscription. The identity needs
@@ -69,6 +73,10 @@ controls where the local store and encryption key are kept.
       --cluster aws/prod-eks --cluster gcp/prod-gke --cluster azure/prod-aks \
       -e LOG_LEVEL=info
 
+        # Keep the service internal instead of creating public load balancers:
+        myplatform deploy --name shop --image nginx:1.27 --service-type ClusterIP \
+          --cluster aws/prod-eks
+
     myplatform status --name shop
 
 ## Layout
@@ -82,3 +90,8 @@ controls where the local store and encryption key are kept.
 ## Adding a cloud
 Implement `provider.Provider` (`Name`, `ListClusters`, `RESTConfig`) and
 register it in `provider.Build`. Nothing else changes.
+
+## Monitoring and infrastructure setup
+See [infra/README.md](infra/README.md) for Terraform and Ansible workflows to
+provision EKS/GKE/AKS clusters, install Prometheus and Grafana, and tear down
+created infrastructure.
